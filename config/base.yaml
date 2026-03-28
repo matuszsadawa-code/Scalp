@@ -1,0 +1,36 @@
+config_version: "2.0.0"
+
+system:
+  canonical_clock_ms: 100
+  symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+  execution_venue: bybit
+  data_venues: [bybit, binance]
+  ntp_max_offset_ms: 2000
+  metadata_refresh_interval_h: 4
+  metadata_stale_threshold_h: 8
+
+hard_gates:
+  min_score: 72
+  max_spread_pctl: 80
+  max_failure_ms: 3000
+  min_data_quality_score: 0.85
+  min_latency_score: 0.80
+  max_signal_age_ms: 2000
+
+execution:
+  passive_first: true
+  passive_ttl_ms: 500
+  passive_reprice_limit: 1
+  aggressive_fallback: true
+  aggressive_max_signal_age_ms: 1200
+  aggressive_size_fraction: 0.5
+
+risk:
+  base_risk_pct: 0.20
+  high_score_risk_pct: 0.30
+  half_risk_pct: 0.10
+  daily_soft_stop_pct: 1.0
+  daily_hard_stop_pct: 1.5
+  max_leverage: 5
+  correlated_cluster_cap_r: 1.5
+  min_viable_risk_pct: 0.10
