@@ -3432,3 +3432,286 @@ Przed przejściem do produkcji:
 - [ ] Alerting operational: all alert types tested.
 - [ ] Documentation: README, deployment guide, operational runbook.
 - [ ] Security: API keys in env vars, not in config files. `.env` in `.gitignore`.
+-----
+
+## 16. Master plan: od 0 do produkcji (wersja operacyjna „perfect execution”)
+
+Ta sekcja jest nadrzędnym planem wykonawczym opartym na `BLUEPRINT.md` i poprzednich sekcjach tego dokumentu. Zakłada rygor: **najpierw bezpieczeństwo i poprawność, potem performance i edge**.
+
+### 16.1 Definition of Done (DoD) — wersja produkcyjna
+
+System uznajemy za produkcyjny dopiero gdy łącznie spełnia wszystkie warunki:
+
+1. **Funkcjonalność**
+   - Wszystkie 10 warstw działa zgodnie z blueprintem.
+   - Kompletny pipeline: ingest -> normalize -> context -> features -> gates -> scoring -> execution -> risk -> monitoring -> shutdown.
+   - Obsługa core symbols: BTCUSDT, ETHUSDT, SOLUSDT.
+
+2. **Niezawodność**
+   - 14 dni nieprzerwanego soak testu (demo), bez krytycznych awarii.
+   - Automatyczny reconnect WS z exponential backoff + jitter.
+   - Udokumentowane i przetestowane recovery po: reconnect, resync, process restart, metadata refresh fail.
+
+3. **Jakość kodu**
+   - `mypy --strict` bez błędów.
+   - Brak `Any` w interfejsach publicznych.
+   - 0 cyklicznych importów.
+   - `ruff` + testy przechodzą na CI.
+
+4. **Execution realism**
+   - Fill state tylko z private WS (nigdy z REST ack).
+   - Walidacja każdego ordera wobec instrument metadata.
+   - Leverage cap redukuje size (nigdy stop width).
+
+5. **Ryzyko i bezpieczeństwo**
+   - Hard gates 8/8 są absolutnie blokujące.
+   - RiskFSM i kill switch pokryte testami integracyjnymi.
+   - Daily hard stop i cluster exposure wymuszane runtime.
+
+6. **Operacyjność**
+   - Dashboard health + alerty + runbook incident response.
+   - Parquet replay danych raw + features + orders + fills.
+   - Procedura graceful shutdown zweryfikowana scenariuszowo.
+
+### 16.2 Program delivery — 12 fal realizacji
+
+#### Wave 0: Foundation & engineering guardrails (Tydzień 1)
+
+**Cel:** przygotować repo i standardy tak, aby kolejne fazy były szybkie i bezpieczne.
+
+Zakres:
+- finalizacja struktury katalogów zgodnej z blueprint;
+- centralny moduł typów (`Decimal` aliases, enums, events dataclasses frozen slots);
+- pre-commit + CI: ruff, mypy strict, pytest, import-linter;
+- wzorzec `Result[T]` dla hot path;
+- schemat logowania structlog JSON.
+
+Akceptacja:
+- skeleton aplikacji uruchamia się i zamyka poprawnie;
+- CI green;
+- brak naruszeń architektury warstwowej.
+
+#### Wave 1: Market connectivity & local books (Tydzień 2–3)
+
+**Cel:** zbudować prawidłową i odporną warstwę danych rynkowych.
+
+Zakres:
+- Bybit public trades + orderbook (snapshot reset + delta upsert/delete);
+- Binance depth (REST snapshot + buffered WS diffs + `pu == previous_u`);
+- resync manager dla sequence mismatch;
+- canonical clock 100ms;
+- metryki latencji i data quality.
+
+Akceptacja:
+- deterministyczna rekonstrukcja książki na replay;
+- zero wejść gdy `book_invalid` na dowolnym venue;
+- soak test 24h bez memory leak.
+
+#### Wave 2: Boot, metadata, time integrity, health (Tydzień 4)
+
+**Cel:** upewnić się, że system startuje tylko w stanie poprawnym operacyjnie.
+
+Zakres:
+- loader instrument metadata (tick/qty/leverage constraints);
+- NTP check boot + periodic;
+- monitoring drift exchange vs recv timestamps;
+- venue/system status polling;
+- stan `METADATA_STALE` blokujący nowe ordery.
+
+Akceptacja:
+- każdy order validator korzysta z aktualnego metadata snapshot;
+- przekroczenie drift progów wymusza protective action (warning / kill switch).
+
+#### Wave 3: Context & regime intelligence (Tydzień 5–6)
+
+**Cel:** odfiltrować środowiska o niskim expectancy.
+
+Zakres:
+- session model (EU_OPEN, US_OVERLAP);
+- VWAP/POC/value profile;
+- fair value anchor z fallbackiem 24h VWAP;
+- regime engine (exclude TREND_DAY / VOL_EXPANSION);
+- level map (H/L, VAH/VAL, LVN, failed auctions).
+
+Akceptacja:
+- feature snapshot zawiera spójny context state;
+- sygnały poza dozwolonymi sesjami są zawsze odrzucane.
+
+#### Wave 4: Feature engine 100ms (Tydzień 7–9)
+
+**Cel:** dostarczyć kompletny i stabilny zestaw 50+ cech mikrostrukturalnych.
+
+Zakres:
+- OBI, OFI, microprice, spread/depth imbalance;
+- CVD/LAD/trade efficiency;
+- sweep detector (5 warunków AND);
+- absorption/exhaustion/replenishment;
+- liquidation burst estimator i Binance non-confirm context;
+- noise floor (median abs tick-to-tick z 500 trades Bybit).
+
+Akceptacja:
+- brak look-back mutation między bucketami 100ms;
+- testy numeryczne i stabilność wyników na replay.
+
+#### Wave 5: Hard gates + scoring + decision model (Tydzień 10)
+
+**Cel:** sformalizować selekcję trade’ów zgodnie z polityką „quality-first”.
+
+Zakres:
+- implementacja 8 hard gates (all-or-nothing);
+- scorer z wagami 100 i normalizacją komponentów 0..1;
+- risk-tier mapping: <72 skip, 72–79 half, 80–87 base, 88+ max;
+- signal staleness guard (`max_signal_age`).
+
+Akceptacja:
+- brak możliwości bypass hard gates przez wysoki score;
+- pełny audit trail: gate details + score components w logach.
+
+#### Wave 6: Execution engine + FSM (Tydzień 11–12)
+
+**Cel:** bezpiecznie wykonywać zlecenia wyłącznie na Bybit.
+
+Zakres:
+- ExecutionFSM wraz z ABORTED/ERROR/PASSIVE_REPRICE;
+- order validator (tick, qty step, min/max);
+- passive-first z TTL + fallback aggressive;
+- fill tracker oparty o private WS;
+- stop/TP management zgodnie z validity + slippage constraints.
+
+Akceptacja:
+- decyzje pozycji i fill state tylko na bazie private WS;
+- pełna zgodność z metadata i leverage cap behavior.
+
+#### Wave 7: Risk engine + RiskFSM (Tydzień 13)
+
+**Cel:** wymusić twardą kontrolę strat i ekspozycji.
+
+Zakres:
+- position sizing (0.10 / 0.20 / 0.30% equity wg score tier);
+- daily limits, consecutive losses, cluster cap 1.5R;
+- degraded mode (feed quality, drift, metadata stale);
+- RiskFSM transitions NORMAL -> ... -> KILL_SWITCH.
+
+Akceptacja:
+- property tests dla sizing i leverage cap;
+- integration tests przejść RiskFSM i blokad trade.
+
+#### Wave 8: Storage, observability, replay (Tydzień 14–15)
+
+**Cel:** pełna audytowalność i odtwarzalność decyzji.
+
+Zakres:
+- raw event writer (Parquet partycjonowany: data/symbol/venue);
+- feature + signal + order + fill logs;
+- dashboard health (latency, drops, reconnects, drift);
+- alerting (warning/error/critical) i runbook mapping.
+
+Akceptacja:
+- „one-click replay” sesji z identycznym decision trace;
+- metryki operacyjne dostępne online i historycznie.
+
+#### Wave 9: Backtest/replay validation framework (Tydzień 16)
+
+**Cel:** zweryfikować stabilność edge i odporność na overfitting.
+
+Zakres:
+- deterministic replay runner;
+- walk-forward splits per symbol/session;
+- sensitivity analysis progów i wag;
+- robustness tests (latency injection, dropped packets, burst volatility).
+
+Akceptacja:
+- raport expectancy net-of-fees/slippage;
+- brak katastroficznej degradacji po perturbacji parametrów.
+
+#### Wave 10: Demo forward rollout (Tydzień 17–24)
+
+**Cel:** etapowe uruchomienie live-demo zgodnie z blueprint.
+
+Kolejność:
+1. BTCUSDT (2 tygodnie)
+2. ETHUSDT (2 tygodnie)
+3. SOLUSDT (2 tygodnie)
+4. Expansion symbols (2+ tygodnie)
+
+Każdy etap wymaga:
+- min 10 sesji handlowych danych;
+- brak incidentów CRITICAL;
+- zgodność wykonania z policy (no forbidden actions).
+
+#### Wave 11: Production hardening & release (Tydzień 25+)
+
+**Cel:** przejście z demo do produkcji z kontrolą ryzyka wdrożenia.
+
+Zakres:
+- secrets management i deployment pipeline;
+- blue/green release + rollback plan;
+- on-call handbook;
+- formalny go-live checklist i sign-off (engineering + risk).
+
+Akceptacja:
+- dry-run failover;
+- zatwierdzone SLA/SLO;
+- finalny release tag i changelog.
+
+### 16.3 Strumienie równoległe (cross-functional)
+
+1. **Quality stream**
+   - codzienny mypy strict + test coverage trend;
+   - weekly architecture compliance review.
+
+2. **Research stream**
+   - kalibracja wag score na replay;
+   - walidacja nowych filtrów tylko jako „edge boosters”, nigdy core dependency.
+
+3. **Reliability stream**
+   - chaos drills: WS disconnect, packet loss, stale metadata;
+   - MTTR tracking i usprawnienia runbooków.
+
+4. **Risk governance stream**
+   - tygodniowy review drawdown i risk-state transitions;
+   - niezależny audit zmian parametrów.
+
+### 16.4 Test matrix (must-have)
+
+- **Unit tests:** parsery venue, normalizatory, walidatory, kalkulacje risk.
+- **Property tests:** sequence consistency, rounding invariants, sizing invariants.
+- **Integration tests:** end-to-end na syntetycznych feedach.
+- **Replay tests:** deterministyczność bucketów 100ms i decyzji.
+- **Soak tests:** 24h, 72h, 14d.
+- **Chaos tests:** reconnect storms, delayed private WS, REST 429/5xx bursts.
+- **UAT risk tests:** symulacja serii strat, daily hard stop, kill switch.
+
+### 16.5 KPI / SLO dla produkcji
+
+SLO techniczne:
+- uptime procesu >= 99.5% w oknach sesyjnych;
+- recovery WS <= 5s median, <= 20s p95;
+- 0 niespójnych state transitions FSM krytycznych.
+
+SLO handlowe (demo->prod gate):
+- 100% zgodność z hard gates policy;
+- 0 trade z `book_invalid`;
+- 0 trade bez private WS potwierdzającego lifecycle;
+- p95 slippage i fill ratio w granicach uzgodnionych per symbol.
+
+### 16.6 Governance zmian
+
+- Każda zmiana thresholdów i wag wymaga:
+  1. PR z uzasadnieniem,
+  2. replay before/after,
+  3. podpis engineering + risk owner,
+  4. rollout canary na 1 symbol.
+
+- Zakaz „silent config drift”: config immutable po boot, wersjonowany snapshot w logach.
+
+### 16.7 Finalna sekwencja uruchomienia produkcyjnego
+
+1. Freeze kodu i configu.
+2. Pełny regression suite + 72h soak.
+3. Canary production na BTCUSDT (najniższy risk tier).
+4. 5 sesji bez incydentu -> podniesienie do standard tier.
+5. Dodanie ETHUSDT, potem SOLUSDT.
+6. Expansion symbols dopiero po 4 tygodniach stabilności core.
+
+To domyka plan „od 0 do produkcji” z zachowaniem wymagań blueprintu, rygorów ryzyka i realizmu execution.
