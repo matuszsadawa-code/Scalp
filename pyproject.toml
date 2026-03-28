@@ -30,6 +30,7 @@ dev = [
 ]
 
 [tool.mypy]
+mypy_path = "typings"
 python_version = "3.12"
 strict = true
 warn_unused_configs = true
